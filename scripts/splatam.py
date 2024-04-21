@@ -36,6 +36,8 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
+from .predict_init_pose import PoseNetwork
+
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["icl"]:
@@ -420,7 +422,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     return params, variables
 
 
-def initialize_camera_pose(params, curr_time_idx, forward_prop):
+def initialize_camera_pose(params, curr_time_idx, forward_prop, pose_lag, pose_network):
     with torch.no_grad():
         if curr_time_idx > 1 and forward_prop:
             # Initialize the camera pose for the current frame based on a constant velocity model
@@ -430,10 +432,15 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
             new_rot = F.normalize(prev_rot1 + (prev_rot1 - prev_rot2))
             params['cam_unnorm_rots'][..., curr_time_idx] = new_rot.detach()
             # Translation
-            prev_tran1 = params['cam_trans'][..., curr_time_idx-1].detach()
-            prev_tran2 = params['cam_trans'][..., curr_time_idx-2].detach()
-            new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
-            params['cam_trans'][..., curr_time_idx] = new_tran.detach()
+            if curr_time_idx <= pose_lag:
+                prev_tran1 = params['cam_trans'][..., curr_time_idx-1].detach()
+                prev_tran2 = params['cam_trans'][..., curr_time_idx-2].detach()
+                new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
+                params['cam_trans'][..., curr_time_idx] = new_tran.detach()
+            else:
+                new_tran = pose_network.pose_predict(params['cam_trans'][..., curr_time_idx-pose_lag:curr_time_idx])
+                params['cam_trans'][..., curr_time_idx] = torch.tensor(new_tran, devide=new_rot.device).detach()
+
         else:
             # Initialize the camera pose for the current frame
             params['cam_unnorm_rots'][..., curr_time_idx] = params['cam_unnorm_rots'][..., curr_time_idx-1].detach()
@@ -453,6 +460,13 @@ def convert_params_to_store(params):
 
 
 def rgbd_slam(config: dict):
+    ########### For Pose Init ###############
+    pose_train_amount = 1000
+    pose_network = PoseNetwork()
+    pose_trained = False
+    pose_lag = 10
+    #########################################
+
     # Print Config
     print("Loaded Config:")
     if "use_depth_loss_thres" not in config['tracking']:
@@ -671,7 +685,10 @@ def rgbd_slam(config: dict):
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+            if not pose_trained:
+                pose_network.pose_train(params['cam_trans'][..., time_idx-1].detach().cpu().numpy())
+                pose_trained = True
+            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'], pose_lag=pose_lag, pose_network=pose_network)
 
         # Tracking
         tracking_start_time = time.time()
