@@ -422,7 +422,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     return params, variables
 
 
-def initialize_camera_pose(params, curr_time_idx, forward_prop, pose_lag, pose_network):
+def initialize_camera_pose(params, curr_time_idx, forward_prop, pose_init, pose_lag, pose_network):
     with torch.no_grad():
         if curr_time_idx > 1 and forward_prop:
             # Initialize the camera pose for the current frame based on a constant velocity model
@@ -432,7 +432,7 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop, pose_lag, pose_n
             new_rot = F.normalize(prev_rot1 + (prev_rot1 - prev_rot2))
             params['cam_unnorm_rots'][..., curr_time_idx] = new_rot.detach()
             # Translation
-            if curr_time_idx <= pose_lag:
+            if not pose_init:
                 prev_tran1 = params['cam_trans'][..., curr_time_idx-1].detach()
                 prev_tran2 = params['cam_trans'][..., curr_time_idx-2].detach()
                 new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
@@ -464,6 +464,7 @@ def rgbd_slam(config: dict):
     pose_train_amount = 1000
     pose_network = PoseNetwork()
     pose_trained = False
+    pose_init = False
     pose_lag = 10
     #########################################
 
@@ -685,10 +686,12 @@ def rgbd_slam(config: dict):
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
-            if not pose_trained:
+            if time_idx > pose_train_amount and not pose_trained:
                 pose_network.pose_train(params['cam_trans'][..., time_idx-1].detach().cpu().numpy())
                 pose_trained = True
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'], pose_lag=pose_lag, pose_network=pose_network)
+                pose_init = True
+            
+            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'], pose_init=pose_init, pose_lag=pose_lag, pose_network=pose_network)
 
         # Tracking
         tracking_start_time = time.time()
